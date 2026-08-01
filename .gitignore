@@ -1,0 +1,53 @@
+# =============================================================================
+# deepfake_core — .gitignore
+# =============================================================================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# --- Virtual Environments ---
+.venv/
+venv/
+ENV/
+
+# --- Model Artifacts ---
+*.pt
+*.pth
+*.onnx
+*.engine
+*.trt
+
+# --- Data Cache (hot SSD storage — do not commit) ---
+data_cache/
+
+# --- Media Files ---
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.wmv
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+Thumbs.db
+.DS_Store
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Logs ---
+*.log
+logs/
