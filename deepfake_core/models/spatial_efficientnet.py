@@ -58,12 +58,8 @@ class SpatialForensicClassifier(nn.Module):
         # --- Classification Head ---
         # EfficientNet-B0 outputs 1280-dim features
         self.classifier = nn.Sequential(
-            nn.Dropout(p=dropout_rate),
-            nn.Linear(1280, 512),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm1d(512),
-            nn.Dropout(p=dropout_rate * 0.67),  # Lighter dropout in deeper layers
-            nn.Linear(512, 1),
+            nn.Dropout(p=0.5),
+            nn.Linear(1280, 1),
         )
 
         # Initialize classifier weights
@@ -92,7 +88,7 @@ class SpatialForensicClassifier(nn.Module):
         """
         features = self.backbone(x)       # (B, 1280)
         logits = self.classifier(features)  # (B, 1)
-        return torch.sigmoid(logits)
+        return logits.squeeze(-1)
 
     def predict(self, x: torch.Tensor, threshold: float = 0.5) -> dict[str, torch.Tensor]:
         """Run inference and return structured predictions.
@@ -109,7 +105,8 @@ class SpatialForensicClassifier(nn.Module):
         """
         self.eval()
         with torch.no_grad():
-            probs = self.forward(x)
+            logits = self.forward(x)
+            probs = torch.sigmoid(logits)
             preds = (probs >= threshold).long()
             return {
                 "probabilities": probs,
@@ -162,9 +159,14 @@ class SpatialForensicClassifier(nn.Module):
         """Initialize classifier head with Kaiming/Xavier initialization."""
         for module in self.classifier.modules():
             if isinstance(module, nn.Linear):
-                nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
+                if module.out_features == 1:
+                    nn.init.xavier_normal_(module.weight)
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+                else:
+                    nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
             elif isinstance(module, nn.BatchNorm1d):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
