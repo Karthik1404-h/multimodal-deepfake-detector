@@ -1,53 +1,94 @@
 # =============================================================================
-# deepfake_core — .gitignore
+# Multimodal Deepfake Detector — .gitignore
 # =============================================================================
 
-# --- Python ---
+# --- Python / environment ---
+venv/
+.venv/
+env/
+ENV/
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 *.egg-info/
 *.egg
-dist/
 build/
-*.whl
+dist/
 
-# --- Virtual Environments ---
-.venv/
-venv/
-ENV/
+# --- Raw / processed datasets and cache ---
+data/raw/
+data/processed/
+data_cache/
 
-# --- Model Artifacts ---
-*.pt
+data/**/*.zip
+data/**/*.tar.gz
+data/**/*.mp4
+data/**/*.avi
+data/**/*.mov
+data/**/*.mkv
+data/**/*.wmv
+data/**/*.flv
+data/**/*.csv
+data/**/*.parquet
+data/**/*.jsonl
+data/**/*.jpg
+data/**/*.jpeg
+data/**/*.png
+data/**/*.bmp
+data/**/*.gif
+data/**/*.webp
+data/**/*.tif
+data/**/*.tiff
+data/**/*.npy
+data/**/*.npz
+
+data/**/*.img
+data/**/*.dat
+
+data/**/*.imagedir/
+
+data/**/images/
+data/**/frames/
+
+# --- Model checkpoints and large binaries ---
+models/checkpoints/
+models/logs/
+models/reports/inference/
 *.pth
+*.pt
+*.ckpt
+*.tflite
+*.tar.gz
+*.zip
+*.bin
+*.h5
 *.onnx
 *.engine
 *.trt
 
-# --- Data Cache (hot SSD storage — do not commit) ---
-data_cache/
+# --- Logs and reports ---
+*.log
+logs/
 
-# --- Media Files ---
-*.mp4
-*.avi
-*.mkv
-*.mov
-*.wmv
-
-# --- IDE ---
-.idea/
+# --- IDE / editor ---
 .vscode/
+.idea/
 *.swp
 *.swo
 *~
 
 # --- OS ---
-Thumbs.db
 .DS_Store
+Thumbs.db
+Desktop.ini
 
-# --- Jupyter ---
+# --- Jupyter / notebooks ---
 .ipynb_checkpoints/
 
-# --- Logs ---
-*.log
-logs/
+# --- Optional local configuration ---
+.env
+.env.*

@@ -85,7 +85,7 @@ def get_vram_summary(device_index: int = 0) -> Optional[dict[str, float]]:
     import torch
 
     try:
-        total = torch.cuda.get_device_properties(device_index).total_mem
+        total = torch.cuda.get_device_properties(device_index).total_memory
         allocated = torch.cuda.memory_allocated(device_index)
         reserved = torch.cuda.memory_reserved(device_index)
 
