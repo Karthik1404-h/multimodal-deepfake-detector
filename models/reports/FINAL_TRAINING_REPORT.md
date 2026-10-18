@@ -11,9 +11,9 @@
 | Metric | Value |
 | --- | --- |
 | Best Epoch | 10 |
-| Best Validation Accuracy | 0.9814 |
-| Best Validation Loss | 0.0517 |
-| Best Validation AUC | 0.0000 |
+| Best Validation Accuracy | 0.9756 |
+| Best Validation Loss | 0.0642 |
+| Best Validation AUC | 0.9974 |
 
 ## Convergence Assessment
 - **Validation loss trend:** Decreasing

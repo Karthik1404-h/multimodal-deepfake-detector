@@ -90,6 +90,17 @@ class SpatialForensicClassifier(nn.Module):
         logits = self.classifier(features)  # (B, 1)
         return logits.squeeze(-1)
 
+    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract 1280-dimensional global average pooled features before classification head.
+
+        Args:
+            x: Input tensor of shape (B, 3, 224, 224), normalized to ImageNet statistics.
+
+        Returns:
+            Tensor of shape (B, 1280) containing feature embeddings.
+        """
+        return self.backbone(x)
+
     def predict(self, x: torch.Tensor, threshold: float = 0.5) -> dict[str, torch.Tensor]:
         """Run inference and return structured predictions.
 

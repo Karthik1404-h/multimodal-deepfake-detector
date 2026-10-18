@@ -4,7 +4,7 @@
 # Install PyTorch with CUDA 12.x support:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 #
-# Then install remaining deps:
+# Then install remaining dependencies:
 #   pip install -r requirements.txt
 # =============================================================================
 
@@ -12,18 +12,25 @@
 torch>=2.1.0
 torchvision>=0.16.0
 
-# --- Computer Vision ---
+# --- Computer Vision & Preprocessing ---
 opencv-python>=4.8.0
 mediapipe==0.10.35
+Pillow>=9.0.0
 
-# --- Numerical & Utilities ---
+# --- Numerical, Scientific & Data ---
 numpy>=1.24.0
+scipy>=1.11.0
+pandas>=2.0.0
 tqdm>=4.65.0
 
-# --- Data Ingestion ---
+# --- Web UI & Interactive Visualizations ---
+streamlit>=1.35.0
+plotly>=5.18.0
+
+# --- Dataset Fetching & Hub Utilities ---
 datasets>=2.14.0
 huggingface_hub>=0.16.4
-Pillow>=9.0.0
+kagglehub>=0.2.0
 
 # --- Dev / Testing (optional) ---
 # pytest>=7.0

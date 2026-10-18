@@ -2,7 +2,7 @@
 # Multimodal Deepfake Detector — .gitignore
 # =============================================================================
 
-# --- Python / environment ---
+# --- Python / Environment ---
 venv/
 .venv/
 env/
@@ -19,7 +19,7 @@ __pycache__/
 build/
 dist/
 
-# --- Raw / processed datasets and cache ---
+# --- Raw / Processed Datasets and Cache ---
 data/raw/
 data/processed/
 data_cache/
@@ -50,11 +50,19 @@ data/**/*.img
 data/**/*.dat
 
 data/**/*.imagedir/
-
 data/**/images/
 data/**/frames/
 
-# --- Model checkpoints and large binaries ---
+# --- Audio Files & Scratch ---
+scratch/
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.aac
+*.ogg
+
+# --- Model Checkpoints and Large Binaries ---
 models/checkpoints/
 models/logs/
 models/reports/inference/
@@ -70,25 +78,29 @@ models/reports/inference/
 *.engine
 *.trt
 
-# --- Logs and reports ---
+# --- Logs & Telemetry ---
 *.log
 logs/
 
-# --- IDE / editor ---
+# --- IDE / Agent / Editor Artifacts ---
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.agents/
+.gemini/
+.cursor/
 
-# --- OS ---
+# --- Operating System ---
 .DS_Store
 Thumbs.db
 Desktop.ini
 
-# --- Jupyter / notebooks ---
+# --- Jupyter / Notebooks ---
 .ipynb_checkpoints/
 
-# --- Optional local configuration ---
+# --- Streamlit / Local Configuration ---
+.streamlit/secrets.toml
 .env
 .env.*

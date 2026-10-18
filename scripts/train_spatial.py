@@ -54,6 +54,21 @@ class LabelMapper:
         return 1.0 if x == self.fake_class_idx else 0.0
 
 
+class AddGaussianNoise:
+    """Inject zero-mean Gaussian noise to simulate sensor noise and compression block artifacts."""
+
+    def __init__(self, mean: float = 0.0, std: float = 0.025, p: float = 0.4) -> None:
+        self.mean = mean
+        self.std = std
+        self.p = p
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        if torch.rand(1).item() < self.p:
+            noise = torch.randn_like(tensor) * self.std + self.mean
+            return torch.clamp(tensor + noise, 0.0, 1.0)
+        return tensor
+
+
 def build_dataloaders(
     data_dir: str,
     batch_size: int = 32,
@@ -71,17 +86,33 @@ def build_dataloaders(
     Returns:
         Tuple of (train_loader, val_loader).
     """
+    # Aggressive augmentations to simulate H.264 video compression, blur, and lighting variance
     transform_train = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomRotation(degrees=15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+        # Video compression & lighting variations
+        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.05),
+        # Codec quantization and contrast shifts
+        transforms.RandomAutocontrast(p=0.3),
+        # Compression blurring and motion blur simulation
+        transforms.RandomChoice([
+            transforms.GaussianBlur(kernel_size=(3, 3), sigma=(0.1, 1.5)),
+            transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.5, 2.0)),
+        ]),
+        # Softening and codec sharpness ringing
+        transforms.RandomAdjustSharpness(sharpness_factor=0.6, p=0.4),
+        transforms.RandomAdjustSharpness(sharpness_factor=1.8, p=0.3),
+        # Subtle translation/scale
         transforms.RandomAffine(degrees=0, translate=(0.05, 0.05), scale=(0.95, 1.05)),
         transforms.ToTensor(),
+        # Sensor & compression block noise
+        AddGaussianNoise(mean=0.0, std=0.02, p=0.35),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        transforms.RandomErasing(p=0.2, scale=(0.02, 0.1), value='random')
+        transforms.RandomErasing(p=0.2, scale=(0.02, 0.1), value="random"),
     ])
 
+    # Validation set transforms remain pure and unaugmented
     transform_val = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),

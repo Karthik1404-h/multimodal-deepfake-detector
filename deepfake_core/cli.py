@@ -56,13 +56,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--model-path",
         type=str,
         default=None,
-        help="Path to a trained model checkpoint (.pt). Uses untrained model if not provided.",
+        help="Path to a trained spatial model checkpoint (.pt or .pth). Defaults to models/checkpoints/best_spatial_model.pth if found.",
+    )
+    parser.add_argument(
+        "--temporal-model-path",
+        type=str,
+        default=None,
+        help="Path to a trained temporal model checkpoint (.pt or .pth). Defaults to models/checkpoints/best_temporal_model.pth if found.",
+    )
+    parser.add_argument(
+        "--audio-model-path",
+        type=str,
+        default=None,
+        help="Path to a trained audio model checkpoint (.pt or .pth). Defaults to models/checkpoints/best_audio_model.pth if found.",
     )
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.5,
-        help="Classification threshold (default: 0.5). Scores above this are FAKE.",
+        default=0.65,
+        help="Classification threshold for FAKE (default: 0.65). Scores at or above this are FAKE.",
+    )
+    parser.add_argument(
+        "--uncertain-threshold",
+        type=float,
+        default=0.45,
+        help="Threshold for UNCERTAIN classification (default: 0.45). Scores between this and threshold are UNCERTAIN.",
     )
     parser.add_argument(
         "--max-frames",
@@ -75,6 +93,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.5,
         help="Minimum face detection confidence (default: 0.5).",
+    )
+    parser.add_argument(
+        "--calibration-bias",
+        type=float,
+        default=0.10,
+        help="Calibration bias penalty applied to raw spatial scores to counteract compression domain shift (default: 0.10).",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -127,12 +151,35 @@ def main(argv: list[str] | None = None) -> int:
 
         logger.info("Initializing detector on device='%s'...", args.device)
 
+        # Auto-detect default trained model checkpoints if none provided
+        model_path = args.model_path
+        if model_path is None:
+            default_ckpt = Path("models/checkpoints/best_spatial_model.pth")
+            if default_ckpt.exists():
+                model_path = str(default_ckpt)
+
+        temporal_model_path = args.temporal_model_path
+        if temporal_model_path is None:
+            default_temp_ckpt = Path("models/checkpoints/best_temporal_model.pth")
+            if default_temp_ckpt.exists():
+                temporal_model_path = str(default_temp_ckpt)
+
+        audio_model_path = args.audio_model_path
+        if audio_model_path is None:
+            default_audio_ckpt = Path("models/checkpoints/best_audio_model.pth")
+            if default_audio_ckpt.exists():
+                audio_model_path = str(default_audio_ckpt)
+
         detector = UnifiedDetector(
             device=args.device,
-            model_path=args.model_path,
+            model_path=model_path,
+            temporal_model_path=temporal_model_path,
+            audio_model_path=audio_model_path,
             threshold=args.threshold,
+            uncertain_threshold=args.uncertain_threshold,
             max_frames=args.max_frames,
             face_confidence=args.face_confidence,
+            calibration_bias=args.calibration_bias,
         )
 
         logger.info("Analyzing: %s", video_path.name)

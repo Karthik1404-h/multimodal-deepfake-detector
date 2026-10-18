@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+"""Training script for TemporalAnomalyLSTM using pre-computed spatial embeddings.
+
+Trains the bidirectional LSTM with temporal attention on pre-computed (num_frames, 1280)
+feature sequence tensors to classify videos as REAL (0) or FAKE (1).
+
+Usage::
+
+    python scripts/train_temporal.py \\
+        --data-dir data/processed/embeddings/train \\
+        --epochs 15 \\
+        --batch-size 64 \\
+        --lr 1e-4 \\
+        --device cuda
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+import time
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, random_split
+from tqdm import tqdm
+
+from deepfake_core.data.temporal_dataset import TemporalEmbeddingDataset
+from deepfake_core.models.temporal_lstm import TemporalAnomalyLSTM
+from deepfake_core.utils.vram_manager import clear_gpu_cache, get_vram_summary
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("train_temporal")
+
+
+def train_one_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+    device: torch.device,
+    epoch: int,
+    total_epochs: int,
+) -> tuple[float, float]:
+    """Execute one training epoch over the dataset.
+
+    Returns:
+        Tuple of (average_loss, accuracy).
+    """
+    model.train()
+    total_loss = 0.0
+    correct = 0
+    total = 0
+
+    progress = tqdm(loader, desc=f"Epoch {epoch:02d}/{total_epochs:02d} [Train]", unit="batch")
+
+    for x_batch, y_batch in progress:
+        x_batch = x_batch.to(device)  # (B, T, 1280)
+        y_batch = y_batch.to(device)  # (B,)
+
+        optimizer.zero_grad()
+
+        use_amp = (device.type == "cuda")
+        with torch.amp.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+            logits = model(x_batch)  # (B,)
+            loss = criterion(logits, y_batch)
+
+        if use_amp:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+        batch_size = x_batch.size(0)
+        total_loss += loss.item() * batch_size
+
+        preds = (logits >= 0.0).float()
+        correct += (preds == y_batch).sum().item()
+        total += batch_size
+
+        running_loss = total_loss / max(total, 1)
+        running_acc = (correct / max(total, 1)) * 100
+        progress.set_postfix({"loss": f"{running_loss:.4f}", "acc": f"{running_acc:.1f}%"})
+
+    avg_loss = total_loss / max(total, 1)
+    acc = correct / max(total, 1)
+    return avg_loss, acc
+
+
+def validate(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+    epoch: int,
+    total_epochs: int,
+) -> tuple[float, float]:
+    """Evaluate model on the validation split.
+
+    Returns:
+        Tuple of (val_loss, val_acc).
+    """
+    model.eval()
+    total_loss = 0.0
+    correct = 0
+    total = 0
+
+    progress = tqdm(loader, desc=f"Epoch {epoch:02d}/{total_epochs:02d} [Val]  ", unit="batch")
+
+    with torch.no_grad():
+        for x_batch, y_batch in progress:
+            x_batch = x_batch.to(device)
+            y_batch = y_batch.to(device)
+
+            use_amp = (device.type == "cuda")
+            with torch.amp.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+                logits = model(x_batch)
+                loss = criterion(logits, y_batch)
+
+            batch_size = x_batch.size(0)
+            total_loss += loss.item() * batch_size
+
+            preds = (logits >= 0.0).float()
+            correct += (preds == y_batch).sum().item()
+            total += batch_size
+
+            running_loss = total_loss / max(total, 1)
+            running_acc = (correct / max(total, 1)) * 100
+            progress.set_postfix({"val_loss": f"{running_loss:.4f}", "val_acc": f"{running_acc:.1f}%"})
+
+    avg_loss = total_loss / max(total, 1)
+    acc = correct / max(total, 1)
+    return avg_loss, acc
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Train TemporalAnomalyLSTM on pre-computed spatial embeddings."
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default="data/processed/embeddings/train",
+        help="Path to pre-computed embeddings containing 'real' and 'fake' subfolders.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="models/checkpoints",
+        help="Directory to save the best model weights.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=15,
+        help="Total training epochs (default: 15).",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="Batch size for training and validation (default: 64).",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=1e-4,
+        help="Learning rate for Adam optimizer (default: 1e-4).",
+    )
+    parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=30,
+        help="Maximum sequence length for frame padding/truncation (default: 30).",
+    )
+    parser.add_argument(
+        "--val-split",
+        type=float,
+        default=0.20,
+        help="Validation split ratio (default: 0.20).",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        choices=["cuda", "cpu"],
+        help="Device to train on (default: cuda).",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader worker processes (default: 0 for reliable Windows compatibility).",
+    )
+
+    args = parser.parse_args(argv)
+
+    # 1. Device resolution
+    if args.device == "cuda" and not torch.cuda.is_available():
+        logger.warning("CUDA unavailable, falling back to CPU.")
+        args.device = "cpu"
+    device = torch.device(args.device)
+
+    logger.info("Initializing Temporal Anomaly Detection Training Pipeline")
+    logger.info("Device:      %s", device)
+    if device.type == "cuda":
+        vram = get_vram_summary()
+        if vram:
+            logger.info("VRAM Total:  %.0f MB (Allocated: %.0f MB)", vram["total_mb"], vram["allocated_mb"])
+
+    # 2. Dataset and Train/Val Split
+    data_dir = Path(args.data_dir)
+    if not data_dir.exists():
+        logger.error("Embeddings directory does not exist: %s", data_dir)
+        return 1
+
+    logger.info("Loading dataset from '%s'...", data_dir)
+    dataset = TemporalEmbeddingDataset(root_dir=data_dir, max_sequence_length=args.max_seq_len)
+
+    total_samples = len(dataset)
+    if total_samples == 0:
+        logger.error(
+            "Dataset is empty! Ensure 'scripts/extract_embeddings.py' has completed and generated .pt files."
+        )
+        return 1
+
+    val_size = max(1, int(total_samples * args.val_split))
+    train_size = total_samples - val_size
+
+    generator = torch.Generator().manual_seed(42)
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=generator)
+
+    logger.info("Dataset Split: %d Train | %d Validation (%d Total)", train_size, val_size, total_samples)
+
+    # 3. DataLoaders
+    pin_mem = (device.type == "cuda")
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=pin_mem,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=pin_mem,
+    )
+
+    # 4. Model Initialization
+    model = TemporalAnomalyLSTM(
+        input_dim=1280,
+        hidden_dim=512,
+        num_layers=2,
+        dropout=0.3,
+    ).to(device)
+
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    scaler = torch.amp.GradScaler(device.type, enabled=(device.type == "cuda"))
+
+    # 5. Output and Log Setup
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    best_checkpoint_path = output_dir / "best_temporal_model.pth"
+
+    log_dir = Path("models/logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    history_file = log_dir / "temporal_training_history.json"
+    history: list[dict] = []
+
+    best_val_loss = float("inf")
+    best_epoch = 0
+    start_time = time.time()
+
+    logger.info("Starting Temporal Training: %d epochs, batch_size=%d, lr=%.1e", args.epochs, args.batch_size, args.lr)
+
+    # 6. Training Loop
+    for epoch in range(1, args.epochs + 1):
+        train_loss, train_acc = train_one_epoch(
+            model=model,
+            loader=train_loader,
+            criterion=criterion,
+            optimizer=optimizer,
+            scaler=scaler,
+            device=device,
+            epoch=epoch,
+            total_epochs=args.epochs,
+        )
+
+        val_loss, val_acc = validate(
+            model=model,
+            loader=val_loader,
+            criterion=criterion,
+            device=device,
+            epoch=epoch,
+            total_epochs=args.epochs,
+        )
+
+        # Print Epoch Summary
+        print(
+            f"Epoch {epoch:02d}/{args.epochs:02d} | "
+            f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc * 100:.1f}% | "
+            f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc * 100:.1f}%"
+        )
+
+        # Log metrics to JSON
+        history.append({
+            "epoch": epoch,
+            "train_loss": round(train_loss, 4),
+            "train_acc": round(train_acc, 4),
+            "val_loss": round(val_loss, 4),
+            "val_acc": round(val_acc, 4),
+        })
+        with open(history_file, "w") as f:
+            json.dump(history, f, indent=4)
+
+        # Save Best Model when validation loss improves
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch
+
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "val_loss": val_loss,
+                    "val_acc": val_acc,
+                    "hyperparameters": {
+                        "input_dim": 1280,
+                        "hidden_dim": 512,
+                        "num_layers": 2,
+                        "dropout": 0.3,
+                        "max_sequence_length": args.max_seq_len,
+                    },
+                },
+                best_checkpoint_path,
+            )
+            logger.info("--> Best model saved to '%s' (val_loss=%.4f, val_acc=%.1f%%)", best_checkpoint_path, val_loss, val_acc * 100)
+
+        clear_gpu_cache()
+
+    elapsed = time.time() - start_time
+    logger.info(
+        "\nTraining complete in %.1f minutes. Best Epoch: %d (Val Loss: %.4f). Checkpoint: %s",
+        elapsed / 60.0,
+        best_epoch,
+        best_val_loss,
+        best_checkpoint_path,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

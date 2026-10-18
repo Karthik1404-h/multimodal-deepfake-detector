@@ -107,12 +107,14 @@ class FaceExtractor:
 
     # --- Public API ---
 
-    def extract_face_crop(self, frame: np.ndarray) -> Optional[np.ndarray]:
+    def extract_face_crop(self, frame: np.ndarray, is_bgr: bool = False) -> Optional[np.ndarray]:
         """Extract and crop the primary face from a video frame.
 
         Args:
-            frame: BGR image (OpenCV format) as a numpy array.
+            frame: RGB image (or BGR if is_bgr=True) as a numpy array.
                    Shape: (H, W, 3), dtype: uint8.
+            is_bgr: Whether the input frame is BGR (OpenCV default).
+                   Default is False (expects RGB).
 
         Returns:
             A 224×224 RGB numpy array of the cropped face, or None
@@ -127,8 +129,7 @@ class FaceExtractor:
                 "Use: `with FaceExtractor() as extractor:`"
             )
 
-        # MediaPipe expects RGB input
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if is_bgr else frame
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
         
         results = self._detector.detect(mp_image)
@@ -144,11 +145,12 @@ class FaceExtractor:
 
         return self._crop_and_resize(frame_rgb, detection)
 
-    def extract_all_faces(self, frame: np.ndarray) -> list[np.ndarray]:
+    def extract_all_faces(self, frame: np.ndarray, is_bgr: bool = False) -> list[np.ndarray]:
         """Extract all detected faces from a frame.
 
         Args:
-            frame: BGR image (OpenCV format).
+            frame: RGB image (or BGR if is_bgr=True).
+            is_bgr: Whether the input frame is BGR. Default is False.
 
         Returns:
             List of 224×224 RGB face crops. Empty list if no faces found.
@@ -161,7 +163,7 @@ class FaceExtractor:
                 "FaceExtractor must be used as a context manager."
             )
 
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if is_bgr else frame
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
         
         results = self._detector.detect(mp_image)
