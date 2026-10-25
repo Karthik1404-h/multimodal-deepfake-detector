@@ -241,14 +241,29 @@ def main(argv: list[str] | None = None) -> int:
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=generator)
     logger.info("Partition: %d Train | %d Validation", train_size, val_size)
 
-    # Effective batch size: clamp to train_size if batch_size > train_size
+    # 3. Stratified and Balanced Training Setup
+    train_labels = [dataset.samples[i][1] for i in train_dataset.indices]
+    num_real = sum(1 for y in train_labels if y == 0.0)
+    num_fake = sum(1 for y in train_labels if y == 1.0)
+    logger.info("Train set composition: %d REAL, %d FAKE", num_real, num_fake)
+
+    # Compute inverse class frequencies for balanced sampling
+    weight_real = 1.0 / max(num_real, 1)
+    weight_fake = 1.0 / max(num_fake, 1)
+    sample_weights = [weight_fake if y == 1.0 else weight_real for y in train_labels]
+    sampler = torch.utils.data.WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(train_dataset),
+        replacement=True,
+    )
+
     batch_size = min(args.batch_size, train_size) if train_size > 0 else args.batch_size
 
     pin_mem = (device.type == "cuda")
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        sampler=sampler,
         num_workers=args.num_workers,
         pin_memory=pin_mem,
     )
@@ -260,10 +275,11 @@ def main(argv: list[str] | None = None) -> int:
         pin_memory=pin_mem,
     )
 
-    # 4. Model, Loss, Optimizer
+    # 4. Model, Loss, Optimizer with Cosine Annealing Schedule
     model = AudioForensicCNN().to(device)
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scaler = torch.amp.GradScaler(device.type, enabled=(device.type == "cuda"))
 
     # 5. Output and Log Setup
@@ -276,13 +292,14 @@ def main(argv: list[str] | None = None) -> int:
     history_file = log_dir / "audio_training_history.json"
     history: list[dict] = []
 
+    best_val_score = -1.0
     best_val_loss = float("inf")
     best_epoch = 0
     start_time = time.time()
 
     logger.info("Starting Audio CNN Training: %d epochs, batch_size=%d, lr=%.1e", args.epochs, batch_size, args.lr)
 
-    # 6. Training Loop
+    # 6. Training Loop with Live Console Streaming
     for epoch in range(1, args.epochs + 1):
         train_loss, train_acc = train_one_epoch(
             model=model,
@@ -303,12 +320,14 @@ def main(argv: list[str] | None = None) -> int:
             epoch=epoch,
             total_epochs=args.epochs,
         )
+        scheduler.step()
 
-        # Print Epoch Summary
+        # Print Epoch Summary directly to terminal with immediate flush
         print(
             f"Epoch {epoch:02d}/{args.epochs:02d} | "
             f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc * 100:.1f}% | "
-            f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc * 100:.1f}%"
+            f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc * 100:.1f}%",
+            flush=True,
         )
 
         history.append({
@@ -321,8 +340,10 @@ def main(argv: list[str] | None = None) -> int:
         with open(history_file, "w") as f:
             json.dump(history, f, indent=4)
 
-        # Checkpoint if validation loss improves
-        if val_loss < best_val_loss:
+        # Checkpoint prioritizing validation accuracy then validation loss
+        is_best = (val_acc > best_val_score) or (val_acc == best_val_score and val_loss < best_val_loss)
+        if is_best:
+            best_val_score = val_acc
             best_val_loss = val_loss
             best_epoch = epoch
 
@@ -341,10 +362,11 @@ def main(argv: list[str] | None = None) -> int:
 
     elapsed = time.time() - start_time
     logger.info(
-        "\nTraining complete in %.1f minutes. Best Epoch: %d (Val Loss: %.4f). Checkpoint: %s",
+        "\nTraining complete in %.1f minutes. Best Epoch: %d (Val Loss: %.4f, Val Acc: %.1f%%). Checkpoint: %s",
         elapsed / 60.0,
         best_epoch,
         best_val_loss,
+        best_val_score * 100,
         best_checkpoint_path,
     )
     return 0

@@ -44,17 +44,20 @@ class FaceExtractor:
             to include forehead/chin context. 0.3 = 30% extra on each side.
     """
 
-    MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
+    SHORT_RANGE_URL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
+    FULL_RANGE_URL = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_full_range/float16/1/blaze_face_full_range.tflite"
 
     def __init__(
         self,
-        min_confidence: float = 0.5,
+        min_confidence: float = 0.35,
         crop_size: int = 224,
         padding_ratio: float = 0.3,
+        model_type: str = "full_range",
     ) -> None:
         self.min_confidence = min_confidence
         self.crop_size = crop_size
         self.padding_ratio = padding_ratio
+        self.model_type = model_type
         self._detector: Optional[vision.FaceDetector] = None
 
     def _download_model_if_needed(self) -> str:
@@ -63,16 +66,20 @@ class FaceExtractor:
         Returns:
             Absolute path to the downloaded TFLite model file.
         """
-        # Place it in a models/ directory at the project root
         project_root = Path.cwd()
         models_dir = project_root / "models"
         models_dir.mkdir(parents=True, exist_ok=True)
         
-        model_path = models_dir / "blaze_face_short_range.tflite"
+        if self.model_type == "full_range":
+            model_path = models_dir / "blaze_face_full_range.tflite"
+            url = self.FULL_RANGE_URL
+        else:
+            model_path = models_dir / "blaze_face_short_range.tflite"
+            url = self.SHORT_RANGE_URL
         
         if not model_path.exists():
-            logger.info("Downloading MediaPipe face detection model to %s...", model_path)
-            urllib.request.urlretrieve(self.MODEL_URL, str(model_path))
+            logger.info("Downloading MediaPipe face detection model (%s) to %s...", self.model_type, model_path)
+            urllib.request.urlretrieve(url, str(model_path))
             logger.info("Download complete.")
             
         return str(model_path)
@@ -91,7 +98,8 @@ class FaceExtractor:
         self._detector = vision.FaceDetector.create_from_options(options)
         
         logger.debug(
-            "FaceExtractor initialized (confidence=%.2f, crop=%d, padding=%.2f)",
+            "FaceExtractor initialized (model=%s, confidence=%.2f, crop=%d, padding=%.2f)",
+            self.model_type,
             self.min_confidence,
             self.crop_size,
             self.padding_ratio,
@@ -218,6 +226,13 @@ class FaceExtractor:
         if x2 <= x1 or y2 <= y1:
             logger.warning("Invalid face bounding box: (%d,%d)-(%d,%d)", x1, y1, x2, y2)
             return None
+
+        # Filter out non-face aspect ratios (prevents shirts/shadows from being detected as faces)
+        if box_h > 0 and box_w > 0:
+            aspect = box_w / float(box_h)
+            if aspect < 0.45 or aspect > 2.10:
+                logger.debug("Rejected detection with non-face aspect ratio: %.2f", aspect)
+                return None
 
         face_crop = frame_rgb[y1:y2, x1:x2]
 

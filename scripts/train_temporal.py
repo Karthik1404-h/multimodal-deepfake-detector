@@ -246,12 +246,27 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info("Dataset Split: %d Train | %d Validation (%d Total)", train_size, val_size, total_samples)
 
-    # 3. DataLoaders
+    # 3. Stratified and Balanced Training Setup
+    train_labels = [dataset.samples[i][1] for i in train_dataset.indices]
+    num_real = sum(1 for y in train_labels if y == 0)
+    num_fake = sum(1 for y in train_labels if y == 1)
+    logger.info("Train set composition: %d REAL, %d FAKE", num_real, num_fake)
+
+    # Compute inverse class frequencies for balanced sampling
+    weight_real = 1.0 / max(num_real, 1)
+    weight_fake = 1.0 / max(num_fake, 1)
+    sample_weights = [weight_fake if y == 1 else weight_real for y in train_labels]
+    sampler = torch.utils.data.WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(train_dataset),
+        replacement=True,
+    )
+
     pin_mem = (device.type == "cuda")
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        sampler=sampler,
         num_workers=args.num_workers,
         pin_memory=pin_mem,
     )
@@ -268,11 +283,13 @@ def main(argv: list[str] | None = None) -> int:
         input_dim=1280,
         hidden_dim=512,
         num_layers=2,
-        dropout=0.3,
+        dropout=0.4,
     ).to(device)
 
+    # Standard unweighted BCE with balanced sampling prevents any prior logit bias
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-3)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
     scaler = torch.amp.GradScaler(device.type, enabled=(device.type == "cuda"))
 
     # 5. Output and Log Setup
@@ -285,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     history_file = log_dir / "temporal_training_history.json"
     history: list[dict] = []
 
+    best_val_score = -1.0
     best_val_loss = float("inf")
     best_epoch = 0
     start_time = time.time()
@@ -312,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
             epoch=epoch,
             total_epochs=args.epochs,
         )
+        scheduler.step()
 
         # Print Epoch Summary
         print(
@@ -331,8 +350,10 @@ def main(argv: list[str] | None = None) -> int:
         with open(history_file, "w") as f:
             json.dump(history, f, indent=4)
 
-        # Save Best Model when validation loss improves
-        if val_loss < best_val_loss:
+        # Save Best Model prioritizing validation accuracy then validation loss
+        is_best = (val_acc > best_val_score) or (val_acc == best_val_score and val_loss < best_val_loss)
+        if is_best:
+            best_val_score = val_acc
             best_val_loss = val_loss
             best_epoch = epoch
 
@@ -346,7 +367,7 @@ def main(argv: list[str] | None = None) -> int:
                         "input_dim": 1280,
                         "hidden_dim": 512,
                         "num_layers": 2,
-                        "dropout": 0.3,
+                        "dropout": 0.4,
                         "max_sequence_length": args.max_seq_len,
                     },
                 },

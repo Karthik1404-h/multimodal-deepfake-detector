@@ -68,9 +68,10 @@ class UnifiedDetector:
         threshold: float = 0.65,
         uncertain_threshold: float = 0.45,
         max_frames: int = 30,
-        face_confidence: float = 0.5,
+        face_confidence: float = 0.35,
         calibration_bias: float = 0.10,
-        min_audio_rms: float = 0.015,
+        min_audio_rms: float = 0.002,
+        enable_audio: bool = False,
     ) -> None:
         # Resolve device with CUDA fallback
         if device == "cuda" and not torch.cuda.is_available():
@@ -84,6 +85,7 @@ class UnifiedDetector:
         self.face_confidence = face_confidence
         self.calibration_bias = calibration_bias
         self.min_audio_rms = min_audio_rms
+        self.enable_audio = enable_audio
 
         # --- 1. Load Spatial Forensic Classifier ---
         self.spatial_model = SpatialForensicClassifier(pretrained=True, freeze_backbone=True)
@@ -193,15 +195,9 @@ class UnifiedDetector:
 
             logger.info("Sampled %d frames from '%s'", len(frames), video_path.name)
 
-            # Step 2: Extract face crops
-            face_crops = self._extract_faces(frames)
-            if not face_crops:
-                raise RuntimeError(
-                    f"No faces detected in any of {len(frames)} sampled frames. "
-                    f"Try lowering face_confidence (current: {self.face_confidence})"
-                )
-
-            logger.info("Extracted %d face crops", len(face_crops))
+            # Step 2: Extract face crops with multi-scale distant subject support
+            face_crops, is_fallback = self._extract_faces(frames)
+            logger.info("Extracted %d face crops (contextual fallback: %s)", len(face_crops), is_fallback)
 
             # Step 3: Run spatial & temporal video pipeline with calibration bias
             effective_bias = self.calibration_bias if calibration_bias is None else calibration_bias
@@ -215,19 +211,31 @@ class UnifiedDetector:
             top_k_mean_prob = float(np.mean(np.sort(raw_fake_probs)[-k:]))
             spatial_score = (0.60 * mean_frame_prob) + (0.40 * top_k_mean_prob)
 
-            # Step 5: Combine video score (30% spatial + 70% temporal)
-            # Temporal LSTM is a far more accurate discriminator of sequential facial dynamics
-            video_score = (0.30 * spatial_score) + (0.70 * temporal_score)
+            # Step 5: Combine video score (40% spatial + 60% temporal)
+            # Balanced fusion between spatial artifact classification and temporal dynamics modeling
+            video_score = (0.40 * spatial_score) + (0.60 * temporal_score)
 
             # Step 6: Audio forensic analysis with RMS voice activity gating
             audio_score, audio_rms = self._run_audio_inference(str(video_path))
             has_audio = (audio_score is not None)
             audio_gated = (audio_rms is not None and audio_score is None)
 
-            # Step 7: Multimodal Late Fusion (Max-confidence strategy)
-            # Avoids diluting partial deepfakes where only visual or audio stream is manipulated
-            if has_audio:
-                final_score = max(float(video_score), float(audio_score))
+            # Step 7: Multimodal Late Fusion
+            # When audio is active, only fuse if audio has high confidence (> threshold) or if enable_audio is True.
+            # Neutral audio (~0.50-0.58) from underfit models is prevented from artificially inflating real video scores.
+            if has_audio and audio_score is not None:
+                if audio_score >= self.threshold:
+                    # High audio deepfake confidence triggers override (voice clone deepfake detection)
+                    final_score = max(float(video_score), float(audio_score))
+                elif self.enable_audio:
+                    if abs(audio_score - 0.50) < 0.12:
+                        # Audio score is neutral (~0.50-0.54) with no discriminatory confidence: rely on visual biometric evidence
+                        final_score = float(video_score)
+                    else:
+                        # Weighted combination when audio has moderate confidence
+                        final_score = (0.75 * float(video_score)) + (0.25 * float(audio_score))
+                else:
+                    final_score = float(video_score)
             else:
                 final_score = float(video_score)
 
@@ -265,6 +273,7 @@ class UnifiedDetector:
                 "mean_frame_prob": round(float(mean_frame_prob), 4),
                 "top_k_mean_prob": round(float(top_k_mean_prob), 4),
                 "frames_analyzed": len(face_crops),
+                "face_fallback_used": is_fallback,
             }
 
             logger.info(
@@ -543,22 +552,76 @@ class UnifiedDetector:
         finally:
             cap.release()
 
-    def _extract_faces(self, frames: list[np.ndarray]) -> list[np.ndarray]:
-        """Extract face crops from a list of RGB frames.
+    def _extract_faces(self, frames: list[np.ndarray]) -> tuple[list[np.ndarray], bool]:
+        """Extract face crops from a list of RGB frames with multi-tier distant subject detection.
 
         Args:
             frames: List of RGB frames.
 
         Returns:
-            List of 224x224 RGB face crops.
+            Tuple of:
+                - List of 224x224 RGB face crops.
+                - Boolean flag indicating whether contextual fallback was used.
         """
-        face_crops: list[np.ndarray] = []
+        face_crops: list[Optional[np.ndarray]] = [None] * len(frames)
+        last_valid_crop: Optional[np.ndarray] = None
 
-        with FaceExtractor(min_confidence=self.face_confidence) as extractor:
-            for frame in frames:
-                # Frame is already converted to RGB immediately after cap.read()
+        # Tier 1: Primary face extraction at user-configured confidence with full-range detector
+        with FaceExtractor(min_confidence=self.face_confidence, model_type="full_range") as extractor:
+            for idx, frame in enumerate(frames):
                 crop = extractor.extract_face_crop(frame, is_bgr=False)
                 if crop is not None:
-                    face_crops.append(crop)
+                    face_crops[idx] = crop
+                    last_valid_crop = crop
 
-        return face_crops
+        valid_count = sum(1 for c in face_crops if c is not None)
+
+        # Tier 2: Adaptive relaxed confidence (0.08) for distant / wide-angle subjects
+        if valid_count < max(5, len(frames) // 4):
+            relaxed_conf = min(0.12, max(0.06, self.face_confidence * 0.35))
+            logger.info("Retrying face detection with high-sensitivity full-range (%.2f) for distant subjects...", relaxed_conf)
+            with FaceExtractor(min_confidence=relaxed_conf, model_type="full_range") as extractor:
+                for idx, frame in enumerate(frames):
+                    if face_crops[idx] is None:
+                        crop = extractor.extract_face_crop(frame, is_bgr=False)
+                        if crop is not None:
+                            face_crops[idx] = crop
+                            if last_valid_crop is None:
+                                last_valid_crop = crop
+
+        valid_count = sum(1 for c in face_crops if c is not None)
+
+        # Tier 3: Multi-Scale Zoom (zoom into upper-center 65% region to magnify distant faces)
+        if valid_count < max(5, len(frames) // 4):
+            logger.info("Attempting multi-scale zoom detection for distant/wide-shot video...")
+            with FaceExtractor(min_confidence=0.08, model_type="full_range") as extractor:
+                for idx, frame in enumerate(frames):
+                    if face_crops[idx] is None:
+                        h, w, _ = frame.shape
+                        y1, y2 = int(0.02 * h), int(0.72 * h)
+                        x1, x2 = int(0.15 * w), int(0.85 * w)
+                        zoomed_roi = frame[y1:y2, x1:x2]
+                        crop = extractor.extract_face_crop(zoomed_roi, is_bgr=False)
+                        if crop is not None:
+                            face_crops[idx] = crop
+                            if last_valid_crop is None:
+                                last_valid_crop = crop
+
+        # Spatiotemporal sequence completion: forward-fill and back-fill across temporary occlusions
+        first_valid_crop: Optional[np.ndarray] = next((c for c in face_crops if c is not None), None)
+        if first_valid_crop is not None:
+            current_crop = first_valid_crop
+            resolved_crops: list[np.ndarray] = []
+            for c in face_crops:
+                if c is not None:
+                    current_crop = c
+                resolved_crops.append(current_crop)
+            return resolved_crops, False
+
+        # If no face detected across all tiers, raise descriptive error
+        raise RuntimeError(
+            f"No faces detected in any of {len(frames)} sampled frames. "
+            "VerifAI requires a visible human subject. If the subject is distant or partially obscured, "
+            "ensure they are facing the camera."
+        )
+

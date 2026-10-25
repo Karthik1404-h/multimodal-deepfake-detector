@@ -213,8 +213,19 @@ class AudioExtractor:
         Returns:
             Tensor of shape (1, 128, 128) containing normalized log Mel-spectrogram.
         """
-        # Ensure minimum length for STFT
-        if waveform.numel() < self.n_fft:
+        # Standardize duration to 4 seconds (64,000 samples at 16kHz) around highest-energy speech
+        window_size = 64000
+        if waveform.numel() > window_size:
+            best_start = 0
+            max_energy = 0.0
+            step = 8000  # 0.5s stride
+            for start in range(0, waveform.numel() - window_size + 1, step):
+                energy = float(torch.sum(waveform[start : start + window_size] ** 2))
+                if energy > max_energy:
+                    max_energy = energy
+                    best_start = start
+            waveform = waveform[best_start : best_start + window_size]
+        elif waveform.numel() < self.n_fft:
             pad_len = self.n_fft - waveform.numel()
             waveform = F.pad(waveform, (0, pad_len))
 
